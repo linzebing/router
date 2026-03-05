@@ -308,6 +308,24 @@ impl ServiceRegistry {
             .map(|instance| instance.zmq_address.clone())
     }
 
+    /// Get prefill instances filtered by pool name.
+    /// WARNING: Multi-pool ZMQ discovery requires vLLM worker-side changes and is not
+    /// yet supported. This method returns all prefill instances regardless of pool,
+    /// which means pool-based routing is NOT effective in ZMQ discovery mode.
+    /// Use K8s service discovery (--service-discovery) for multi-pool support.
+    pub fn get_prefill_instances_by_pool(&self, pool: &str) -> Vec<(String, String)> {
+        let count = self.prefill_instances.lock().unwrap().len();
+        if count > 0 {
+            warn!(
+                "Multi-pool prefill routing is NOT supported in ZMQ discovery mode. \
+                 Pool '{}' filter ignored — returning all {} prefill instances. \
+                 Use --service-discovery for pool-aware routing.",
+                pool, count
+            );
+        }
+        self.get_prefill_instances()
+    }
+
     /// Get all available prefill instances
     pub fn get_prefill_instances(&self) -> Vec<(String, String)> {
         let guard = self.prefill_instances.lock().unwrap();
@@ -344,5 +362,70 @@ impl ServiceRegistry {
 impl Drop for ServiceRegistry {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_prefill_instances_by_pool_returns_all_instances() {
+        let registry = ServiceRegistry::new();
+
+        // Register two prefill instances
+        registry.register_service(
+            "http://10.0.0.1:8000".to_string(),
+            "tcp://10.0.0.1:5555".to_string(),
+            ServiceType::Prefill,
+        );
+        registry.register_service(
+            "http://10.0.0.2:8000".to_string(),
+            "tcp://10.0.0.2:5555".to_string(),
+            ServiceType::Prefill,
+        );
+
+        // get_prefill_instances_by_pool is a stub that returns ALL prefill instances
+        // regardless of pool name
+        let text_instances = registry.get_prefill_instances_by_pool("text");
+        let perception_instances = registry.get_prefill_instances_by_pool("perception");
+        let all_instances = registry.get_prefill_instances();
+
+        assert_eq!(text_instances.len(), 2);
+        assert_eq!(perception_instances.len(), 2);
+        assert_eq!(all_instances.len(), 2);
+        assert_eq!(text_instances, all_instances);
+        assert_eq!(perception_instances, all_instances);
+    }
+
+    #[test]
+    fn test_get_prefill_instances_by_pool_empty() {
+        let registry = ServiceRegistry::new();
+
+        // No instances registered — pool query should return empty
+        let instances = registry.get_prefill_instances_by_pool("text");
+        assert!(instances.is_empty());
+    }
+
+    #[test]
+    fn test_get_prefill_instances_by_pool_excludes_decode() {
+        let registry = ServiceRegistry::new();
+
+        // Register one prefill and one decode
+        registry.register_service(
+            "http://10.0.0.1:8000".to_string(),
+            "tcp://10.0.0.1:5555".to_string(),
+            ServiceType::Prefill,
+        );
+        registry.register_service(
+            "http://10.0.0.2:8000".to_string(),
+            "tcp://10.0.0.2:5555".to_string(),
+            ServiceType::Decode,
+        );
+
+        // Should only return prefill instances, not decode
+        let instances = registry.get_prefill_instances_by_pool("text");
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].0, "http://10.0.0.1:8000");
     }
 }
